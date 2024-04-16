@@ -4,30 +4,49 @@ import logging
 import asyncio
 import websockets
 import threading
-import pyautogui
-from pynput.mouse import Listener, Button
+import os
 
 MAX_CLIENTS = 20
 clients = {}
+connected_clients = set()  # Track active connections
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)  # Set logging level to INFO
+
+# Console handler configuration
+console_handler = logging.StreamHandler()
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+
 credentials_entered = False
 confirm_button_created = False
+used_credentials = set()  # Set to track used credentials
 
 async def authenticate_client(websocket, path):
     try:
         data = await websocket.recv()
         username, password = data.split(',')
-        if any((username == entry[0].get() and password == entry[1].get()) for entry in clients.values()):
+        if (username, password) not in used_credentials:
+            # Add the credentials to the set of used credentials
+            used_credentials.add((username, password))
+            connected_clients.add(websocket)  # Add the client to the set of connected clients
             await websocket.send("Authenticated")
         else:
-            await websocket.send("Authentication Failed")
+            await websocket.send("Authentication Failed: Credentials already in use")
     except Exception as e:
         await websocket.send("Error occurred during authentication")
         logger.error(f"Error during authentication: {e}")
 
 async def trigger_command():
-    pyautogui.click()
+    for client in connected_clients:
+        try:
+            await client.send("Left click detected on Server PC.")
+            logger.info("Message sent to all connected clients.")  # Log message sent to clients
+        except Exception as e:
+            logger.error(f"Error sending message to client: {e}")
+            connected_clients.remove(client)
     logger.info("Trigger command sent to all connected clients.")
+    print("Message sent to all connected clients.")
 
 async def send_click_command():
     def on_click(x, y, button, pressed):
@@ -40,15 +59,12 @@ async def send_click_command():
     listener = Listener(on_click=on_click)
     listener.start()
     print("Listener started")
-    # Close the listener to avoid resource leaks
     try:
         await asyncio.Future()  # Keep the function running
     finally:
         listener.stop()
         listener.join()
         print("Listener stopped")
-
-    print("Listener stopped")
 
 async def server(websocket, path):
     try:
@@ -62,8 +78,10 @@ async def server(websocket, path):
     except Exception as e:
         logger.error(f"Error occurred in server: {e}")
 
+port = os.getenv("PORT") or 8765  # Use the PORT environment variable if available, or default to 8765
+
 async def main():
-    async with websockets.serve(server, "localhost", 8765):
+    async with websockets.serve(server, "0.0.0.0", port):
         print("WebSocket server started.")
         await asyncio.Future()
 
@@ -98,14 +116,31 @@ def start_server():
 
 def confirm_credentials():
     global credentials_entered
-    any_credentials_entered = any(username_entry.get() and password_entry.get() for username_entry, password_entry in clients.values())
-    if any_credentials_entered:
-        credentials_entered = True
-        start_server_button.config(state=tk.NORMAL) 
-        status_label.config(text="Credentials entered. You can now start the server.")
-        logger.info("Credentials for at least one client have been confirmed.")
-    else:
-        messagebox.showerror("Error", "Please enter at least one set of client credentials.")
+    global used_credentials
+    global clients
+    
+    # Check if any credentials are entered for each client
+    for username_entry, password_entry in clients.values():
+        username = username_entry.get()
+        password = password_entry.get()
+        if not username or not password:
+            messagebox.showerror("Error", "Please enter both username and password for each client.")
+            return
+    
+    # Check if entered credentials are unique for each client
+    entered_credentials = {(username_entry.get(), password_entry.get()) for username_entry, password_entry in clients.values()}
+    if len(entered_credentials) != len(clients):
+        messagebox.showerror("Error", "Each client should have unique credentials.")
+        return
+    
+    # Update the used_credentials set
+    used_credentials = entered_credentials
+    
+    # Enable the start server button
+    credentials_entered = True
+    start_server_button.config(state=tk.NORMAL) 
+    status_label.config(text="Credentials entered. You can now start the server.")
+    logger.info("Credentials for each client are confirmed.")
 
 def on_enter(event):
     global credentials_entered
